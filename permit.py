@@ -9,13 +9,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
+from selenium.webdriver.common.keys import Keys
 
 # =========================
 # CONFIGURATION
 # =========================
 
 PERMIT_ID = "445857"
-TARGET_DATE = "2026-07-31"   # YYYY-MM-DD
+TARGET_DATE = "2026-08-02"   # YYYY-MM-DD
 GROUP_SIZE = 5
 PERMIT_NAME = "High Sierra Trail"
 
@@ -40,7 +41,9 @@ def build_url():
 def start_driver(profile_path):
     options = Options()
     options.profile = profile_path
-    options.add_argument("--headless")
+    # options.add_argument("--headless")
+    options.add_argument("--width=800")
+    options.add_argument("--height=600")
 
     # --- Performance preferences ---
     options.set_preference("permissions.default.image", 2)   # disable images
@@ -70,7 +73,6 @@ def start_driver(profile_path):
     options.set_preference("useAutomationExtension", False)
 
     driver = webdriver.Firefox(options=options)
-    driver.maximize_window()
     return driver
 
 # =========================
@@ -81,62 +83,63 @@ def wait_for_app(driver):
     WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "recApp")))
 
 def set_group_size(driver, target=GROUP_SIZE):
+
+    # 1) Open the dropdown if it isn't already open
     trigger = WebDriverWait(driver, 15).until(
         EC.element_to_be_clickable((By.ID, "guest-counter"))
     )
-    trigger.click()
-    popup = WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, "guest-counter-popup"))
+
+    if trigger.get_attribute("aria-expanded") == "false":
+        trigger.click()
+
+    # 2) Now wait for the REAL input to appear
+    people_input = WebDriverWait(driver, 15).until(
+        EC.presence_of_element_located(
+            (By.ID, "guest-counter-number-field-People")
+        )
     )
-    people_input = popup.find_element(By.ID, "guest-counter-number-field-People")
-    current = int(people_input.get_attribute("value"))
-    if current > target:
-        raise RuntimeError("Decrementing group size not supported")
-    add_button = popup.find_element(By.XPATH, ".//button[@aria-label='Add Peoples']")
-    for _ in range(target - current):
-        add_button.click()
-    close_button = popup.find_element(By.XPATH, ".//button[.//text()[contains(., 'Close')]]")
-    close_button.click()
-    WebDriverWait(driver, 10).until(
-        lambda d: str(target) in d.find_element(By.ID, "guest-counter").text
+
+    # 3) Clear + type (this is what React actually listens to)
+    people_input.clear()
+    people_input.send_keys(str(target))
+
+    # 4) Trigger React change explicitly
+    driver.execute_script("""
+      arguments[0].dispatchEvent(new Event('input', {bubbles:true}));
+      arguments[0].dispatchEvent(new Event('change', {bubbles:true}));
+    """, people_input)
+
+    # 5) Close the popup so the grid refreshes
+    close_btn = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((
+            By.XPATH,
+            "//div[@id='guest-counter-popup']//button[.//span[text()='Close']]"
+        ))
     )
+    close_btn.click()
 
 def set_date(driver, date_str):
     target = datetime.strptime(date_str, "%Y-%m-%d")
-    target_label = target.strftime("%A, %B %-d, %Y")
-    toggle = WebDriverWait(driver, 15).until(
+
+    # 1) Click to focus the date picker inputs
+    toggle = WebDriverWait(driver, 10).until(
         EC.element_to_be_clickable((By.ID, "single-date-toggle"))
     )
     toggle.click()
-    calendar = WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.CLASS_NAME, "sarsa--calendar"))
+
+    # 2) Wait for inputs to appear
+    month_input = WebDriverWait(driver, 5).until(
+        EC.element_to_be_clickable((By.CSS_SELECTOR, "div.date-segment[aria-label='month, ']"))
     )
-    while True:
-        month_text = calendar.find_element(By.XPATH, ".//h2[@class='rec-sr-only']").text
-        if month_text == target.strftime("%B %Y"):
-            break
-        current = datetime.strptime(month_text, "%B %Y")
-        if current < target:
-            calendar.find_element(By.XPATH, ".//button[@aria-label='Next']").click()
-        else:
-            calendar.find_element(By.XPATH, ".//button[@aria-label='Previous']").click()
-    day_btn = WebDriverWait(calendar, 10).until(
-        EC.element_to_be_clickable((By.XPATH,
-            f".//div[@role='button' and @aria-label='{target_label}']"
-        ))
-    )
-    day_btn.click()
-    WebDriverWait(driver, 10).until(
-        lambda d: d.find_element(By.ID, "single-date-hidden").get_attribute("value") == date_str
-    )
+    day_input = driver.find_element(By.CSS_SELECTOR, "div.date-segment[aria-label='day, ']")
+    year_input = driver.find_element(By.CSS_SELECTOR, "div.date-segment[aria-label='year, ']")
+
+    # 3) Clear & type each value (mimics user input)
+    for input_elem, value in [(month_input, target.month), (day_input, target.day), (year_input, target.year)]:
+        input_elem.click()
+        input_elem.send_keys(str(value))
 
 def select_permit_for_date(driver, permit_name):
-    grid = WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((
-            By.XPATH,
-            "//div[@role='grid' and contains(@class,'detailed-availability-grid-new')]"
-        ))
-    )
     row = WebDriverWait(driver, 20).until(
         EC.presence_of_element_located((
             By.XPATH,
@@ -184,8 +187,8 @@ def run_single_tab_bot():
     driver = start_driver(BASE_PROFILE_PATH)
     driver.get(build_url())
     wait_for_app(driver)
-    set_group_size(driver)
     set_date(driver, TARGET_DATE)
+    set_group_size(driver)
 
     print("[BOT] Starting availability loop...")
     iteration = 0
@@ -202,8 +205,8 @@ def run_single_tab_bot():
                 print("[BOT] No reservations, refreshing...")
                 driver.get(driver.current_url)   # reload via navigation, not .refresh()
                 wait_for_app(driver)
-                set_group_size(driver)
                 set_date(driver, TARGET_DATE)
+                set_group_size(driver)
             else:
                 print(f"[BOT] ERROR: {e}")
                 break
